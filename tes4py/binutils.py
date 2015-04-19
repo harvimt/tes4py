@@ -50,7 +50,6 @@ class FixStrField(StructField):
 class ULongField(StructField):
     def __init__(self, int_type=None):
         self._int_type = int_type
-        #assert issubclass(self._int_type, int)
 
     def transform(self, buffer):
         val = int.from_bytes(buffer, 'little', signed=False)
