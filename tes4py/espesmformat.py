@@ -9,6 +9,8 @@ from enum import IntEnum
 from pathlib import Path
 from mmap import mmap
 from .binutils import *
+import weakref
+import contextlib
 
 class SubItemGenerator:
     def __init__(self, buf_name, child_factory):
@@ -26,21 +28,23 @@ class SubItemGenerator:
             bytes_consumed += child.total_size
 
 class EspEsmFormat(collections.abc.Mapping):
-    def __init__(self, path):
-        self.path = path if isinstance(path, Path) else Path(str(path))
+    def __init__(self, vieworpath = None):
+        if isinstance(vieworpath, memoryview):
+            self.view = vieworpath
+        else:
+            path = vieworpath
+            self.path = path if isinstance(path, Path) else Path(str(path))
         self._num_groups = None
 
     def __enter__(self):
-        self.file = f = self.path.open("r+b")
-        self.mmap = mm = mmap(f.fileno(), 0)
-        self.view = memoryview(mm)
+        self._exit_stack = stack = contextlib.ExitStack()
+        f = stack.enter_context(self.path.open("r+b"))
+        mm = stack.enter_context(mmap(f.fileno(), 0))
+        self.view = stack.enter_context(memoryview(mm))
         return self
 
-    def __close__(self, *args, **kwargs):
-        del self.view
-        self.mmap.close()
-        del self.mmap
-        self.file.close()
+    def __exit__(self, *args, **kwargs):
+        self._exit_stack.close()
 
     @property
     def header(self):
@@ -52,6 +56,9 @@ class EspEsmFormat(collections.abc.Mapping):
 
     groups = SubItemGenerator('group_buf', lambda: Group)
 
+    @property
+    def size(self):
+        return len(self.view) + self.header.total_size
 
     def __iter__(self):
         for group in self.groups:
