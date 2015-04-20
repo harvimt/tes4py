@@ -5,6 +5,7 @@ Created on Sat Apr 18 15:44:59 2015
 @author: gkmachine
 """
 import collections
+import collections.abc
 from enum import IntEnum
 from pathlib import Path
 from mmap import mmap
