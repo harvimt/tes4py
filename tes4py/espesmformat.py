@@ -56,6 +56,7 @@ class EspEsmFormat(BaseRecord, collections.abc.Mapping):
             path = vieworpath
             self.path = path if isinstance(path, Path) else Path(str(path))
         self._num_groups = None
+        self._groups_cache = None
 
     def __enter__(self):
         self._exit_stack = stack = contextlib.ExitStack()
@@ -65,6 +66,7 @@ class EspEsmFormat(BaseRecord, collections.abc.Mapping):
         self.header_size = self.header.total_size
         self.total_size = len(self.view)
         self.size = len(self.view) - self.header_size
+        self._groups_cache = None
         return self
 
     def __exit__(self, *args, **kwargs):
@@ -91,7 +93,17 @@ class EspEsmFormat(BaseRecord, collections.abc.Mapping):
 
     _offset = 0
 
-    groups = SubItemGenerator(lambda: Group)
+    @property
+    def groups(self):
+        if self._groups_cache is None:
+            self._groups_cache = [
+                g for g in self._groups
+                if g.label not in ('WRLD', 'CELL', 'DIAL')
+                # exclude irregular groups for now
+            ]
+        return self._groups_cache
+
+    _groups = SubItemGenerator(lambda: Group)
 
     def __iter__(self):
         for group in self.groups:
@@ -133,6 +145,7 @@ class Group(BaseRecord):
         self.type = type.decode('latin1')
         self.total_size = total_size
         self.size = total_size - self.header_size
+        self._records_cache = None
 
     header_size = 20
 
@@ -140,14 +153,14 @@ class Group(BaseRecord):
     group_type = ULongField(GroupType)[12:16]
     stamp = ULongField[16:20]
 
-    records = SubItemGenerator(lambda: Record)
-    groups = SubItemGenerator(lambda: Group)
+    @property
+    def records(self):
+        if self._records_cache is None:
+            self._records_cache = list(self._records)
+        return self._records_cache
 
-    def __iter__(self):
-        if self.record_buffer[:4] == b'GRUP':
-            return self.groups
-        else:
-            return self.records
+    _records = SubItemGenerator(lambda: Record)
+    groups = SubItemGenerator(lambda: Group)
 
 
 class Record(BaseRecord, collections.abc.Mapping):
@@ -160,6 +173,7 @@ class Record(BaseRecord, collections.abc.Mapping):
         self.total_size = size + self.header_size
 
         assert self.type != 'GRUP'
+
 
     header_size = 20
 
