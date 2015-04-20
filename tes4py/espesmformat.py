@@ -13,21 +13,41 @@ import weakref
 import contextlib
 
 class SubItemGenerator:
-    def __init__(self, buf_name, child_factory):
-        self.buf_name = buf_name
+    def __init__(self, child_factory):
         self.child_factory = child_factory
 
     def __get__(self, instance, cls):
-        buf = getattr(instance, self.buf_name)
-        size = instance.size
+        return instance.generate_subitems(self.child_factory())
+
+class BaseRecord:
+    # properties must implement
+    header_size = None
+    total_size = None
+    size = None
+
+    def __init__(self, buffer, offset):
+        self._buffer = buffer
+        self._offset = offset
+
+    @property
+    def buffer(self):
+        return self._buffer[self._offset: self._offset + self.total_size]
+
+    @property
+    def body_buffer(self):
+        return self._buffer[self._offset + self.header_size: self._offset + self.total_size]
+
+    def generate_subitems(self, factory):
+        buf = self._buffer
+        size = self.size
         bytes_consumed = 0
-        factory = self.child_factory()
+        factory = factory
         while bytes_consumed < size:
-            child = factory(buf[bytes_consumed:])
+            child = factory(buf, self._offset + self.header_size + bytes_consumed)
             yield child
             bytes_consumed += child.total_size
 
-class EspEsmFormat(collections.abc.Mapping):
+class EspEsmFormat(BaseRecord, collections.abc.Mapping):
     def __init__(self, vieworpath = None):
         if isinstance(vieworpath, memoryview):
             self.view = vieworpath
@@ -38,27 +58,39 @@ class EspEsmFormat(collections.abc.Mapping):
 
     def __enter__(self):
         self._exit_stack = stack = contextlib.ExitStack()
-        f = stack.enter_context(self.path.open("r+b"))
-        mm = stack.enter_context(mmap(f.fileno(), 0))
+        self._file = f = stack.enter_context(self.path.open("r+b"))
+        self._mmap = mm = stack.enter_context(mmap(f.fileno(), 0))
         self.view = stack.enter_context(memoryview(mm))
+        self.header_size = self.header.total_size
+        self.total_size = len(self.view)
+        self.size = len(self.view) - self.header_size
         return self
 
     def __exit__(self, *args, **kwargs):
+        #del self.view
+        #del self._mmap
+        #del self._file
         self._exit_stack.close()
 
     @property
+    def _buffer(self):
+        return self.view
+
+    @property
     def header(self):
-        return Record(self.view)
+        return Record(self.view, 0)
 
     @property
-    def group_buf(self):
-        return self.view[self.header.total_size:]
-
-    groups = SubItemGenerator('group_buf', lambda: Group)
+    def buffer(self):
+        return self.view
 
     @property
-    def size(self):
-        return len(self.view) + self.header.total_size
+    def body_buffer(self):
+        return self.view[self.header_size:]
+
+    _offset = 0
+
+    groups = SubItemGenerator(lambda: Group)
 
     def __iter__(self):
         for group in self.groups:
@@ -78,6 +110,7 @@ class EspEsmFormat(collections.abc.Mapping):
                 return group
         raise KeyError(key)
 
+
 class GroupType(IntEnum):
     top=0
     world_children=1
@@ -92,37 +125,22 @@ class GroupType(IntEnum):
     cell_visible_distant_children=10
 
 
-class Group:
-    def __init__(self, buffer):
-        self._buffer = buffer
-        assert self.type == 'GRUP'
-
-    @property
-    def buffer(self):
-        return self._buffer
-
-    @property
-    def record_buffer(self):
-        return self.buffer[self.header_size:]
+class Group(BaseRecord):
+    def __init__(self, buffer, offset):
+        super().__init__(buffer, offset)
+        type, total_size = struct.unpack_from('<4sL', buffer[offset:])
+        self.type = type.decode('latin1')
+        self.total_size = total_size
+        self.size = total_size - self.header_size
 
     header_size = 20
 
-    type = FixStrField[0:4]
-    _size = ULongField[4:8]
     label = FixStrField[8:12]
     group_type = ULongField(GroupType)[12:16]
     stamp = ULongField[16:20]
 
-    @property
-    def total_size(self):
-        return self._size
-
-    @property
-    def size(self):
-        return self._size - self.header_size
-
-    records = SubItemGenerator('record_buffer', lambda: Record)
-    groups = SubItemGenerator('record_buffer', lambda: Group)
+    records = SubItemGenerator(lambda: Record)
+    groups = SubItemGenerator(lambda: Group)
 
     def __iter__(self):
         if self.record_buffer[:4] == b'GRUP':
@@ -131,20 +149,19 @@ class Group:
             return self.records
 
 
-class Record(collections.abc.Mapping):
-    def __init__(self, buffer):
-        self._buffer = buffer
+class Record(BaseRecord, collections.abc.Mapping):
+    def __init__(self, buffer, offset):
+        super().__init__(buffer, offset)
         self._num_subrecords = None
-        assert self.type != 'GRUP'
+        type, size = struct.unpack_from('<4sL', buffer[offset:])
+        self.type = type.decode('latin1')
+        self.size = size
+        self.total_size = size + self.header_size
 
-    @property
-    def buffer(self):
-        return self._buffer
+        assert self.type != 'GRUP'
 
     header_size = 20
 
-    type = FixStrField[0:4]
-    size = ULongField[4:8]
     flags = FlagsField(
         isesm=0x01,
         deleted=0x20,
@@ -162,19 +179,11 @@ class Record(collections.abc.Mapping):
     formid = ULongField[12:16]
     vc_info = NamedTupleField('<BBH', 'VCInfo', ['day', 'month', 'owner'])[16:20]
 
-    @property
-    def subrecord_buffer(self):
-        return self.buffer[self.header_size:self.header_size + self.size]
-
-    subrecords = SubItemGenerator('subrecord_buffer', lambda: SubRecord)
+    subrecords = SubItemGenerator(lambda: SubRecord)
 
     def __iter__(self):
         for subrecords in self.subrecords:
             yield subrecords.type
-
-    @property
-    def total_size(self):
-        return self.size + self.header_size
 
     def __len__(self):
         if self._num_subrecords is None:
@@ -190,26 +199,22 @@ class Record(collections.abc.Mapping):
                 return subrecord
         raise KeyError(key)
 
-class SubRecord:
-    def __init__(self, buffer):
-        self._buffer = buffer
-
-    @property
-    def buffer(self):
-        return self._buffer
-
-    @property
-    def total_size(self):
-        return self.size + self.header_size
+class SubRecord(BaseRecord):
+    def __init__(self, buffer, offset):
+        super().__init__(buffer, offset)
+        type, size = struct.unpack_from('<4sH', buffer[offset:])
+        self.type = type.decode('latin1')
+        self.size = size
+        self.total_size = size + self.header_size
 
     header_size = 6
-    type = FixStrField[0:4]
-    size = ULongField[4:6]
 
     @property
     def zstring(self):
-        buf = self.buffer[self.header_size:self.total_size - 1]
-        return buf.tobytes().decode('latin1')
+        buf = self.body_buffer[:-1].tobytes()
+        assert self.body_buffer[-1] == 0
+        assert b'\0' not in buf
+        return buf.decode('latin1')
 
     formid = ULongField[header_size:header_size+4]
     item_data = NamedTupleField(

@@ -14,4 +14,3 @@ def test_accept1():
         assert idata.gold_value == 8
         assert idata.weight == 4.0
         assert clot_r['FULL'].zstring ==  "Ciirta's Robes"
-        del clot_r  # need to clear all the references to view objects
